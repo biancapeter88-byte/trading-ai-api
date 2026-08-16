@@ -1835,3 +1835,12 @@ def analysis_data(symbol: str):
                 True
         }
     }
+
+@app.get("/api")
+def api_analysis(symbol: str):
+    return analysis_data(symbol)
+
+
+@app.get("/data")
+def data_analysis(symbol: str):
+    return analysis_data(symbol)
