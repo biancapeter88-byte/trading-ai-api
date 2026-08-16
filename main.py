@@ -1,27 +1,92 @@
 import os
+import time
 import requests
+
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+
+
+# ============================================================
+# APP
+# ============================================================
 
 app = FastAPI(
-    title="Trading AI Market API",
-    version="3.1"
+    title="Trading AI Market Data API",
+    version="7.0"
 )
 
-API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-TD_URL = "https://api.twelvedata.com"
-TZ = ZoneInfo("Europe/Berlin")
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+TWELVE_DATA_API_KEY = os.getenv(
+    "TWELVE_DATA_API_KEY"
+)
+
+TWELVE_DATA_URL = (
+    "https://api.twelvedata.com"
+)
+
+TZ = ZoneInfo(
+    "Europe/Berlin"
+)
+
+CACHE_TTL_SECONDS = int(
+    os.getenv(
+        "CACHE_TTL_SECONDS",
+        "300"
+    )
+)
+
+
+# ============================================================
+# WATCHLIST
+# ============================================================
+
+WATCHLIST = [
+
+    ("EURUSD", "EUR/USD"),
+    ("GBPUSD", "GBP/USD"),
+    ("USDJPY", "USD/JPY"),
+    ("USDCHF", "USD/CHF"),
+    ("AUDUSD", "AUD/USD"),
+    ("NZDUSD", "NZD/USD"),
+    ("USDCAD", "USD/CAD"),
+    ("EURGBP", "EUR/GBP"),
+    ("GBPJPY", "GBP/JPY"),
+    ("AUDCHF", "AUD/CHF"),
+    ("XAUUSD", "XAU/USD"),
+
+]
+
+
+# ============================================================
+# CACHE
+# ============================================================
+
+CACHE = {}
 
 
 # ============================================================
 # SYMBOL NORMALIZATION
 # ============================================================
 
-def normalize_symbol(symbol: str) -> str:
-    s = symbol.upper().strip()
+def normalize_symbol(symbol):
+
+    s = (
+        symbol
+        .upper()
+        .strip()
+        .replace("-", "/")
+        .replace("_", "/")
+    )
 
     aliases = {
+
         "EURUSD": "EUR/USD",
         "GBPUSD": "GBP/USD",
         "USDJPY": "USD/JPY",
@@ -33,200 +98,392 @@ def normalize_symbol(symbol: str) -> str:
         "GBPJPY": "GBP/JPY",
         "AUDCHF": "AUD/CHF",
         "XAUUSD": "XAU/USD",
-        "XAGUSD": "XAG/USD",
+
     }
 
-    return aliases.get(s, s)
+    return aliases.get(
+        s,
+        s
+    )
 
 
 # ============================================================
-# TWELVE DATA
+# TWELVE DATA REQUEST
 # ============================================================
 
-def td(endpoint, params):
-    if not API_KEY:
+def twelve_data(
+    endpoint,
+    params
+):
+
+    if not TWELVE_DATA_API_KEY:
+
         raise HTTPException(
+
             status_code=500,
-            detail="TWELVE_DATA_API_KEY is not configured"
+
+            detail={
+                "provider":
+                    "Twelve Data",
+
+                "error":
+                    "TWELVE_DATA_API_KEY is missing"
+            }
         )
 
-    request_params = dict(params)
-    request_params["apikey"] = API_KEY
+
+    request_params = dict(
+        params
+    )
+
+    request_params["apikey"] = (
+        TWELVE_DATA_API_KEY
+    )
+
 
     try:
+
         response = requests.get(
-            f"{TD_URL}/{endpoint}",
+
+            f"{TWELVE_DATA_URL}/{endpoint}",
+
             params=request_params,
+
             timeout=30
+
         )
+
     except requests.RequestException as e:
+
         raise HTTPException(
+
             status_code=502,
-            detail=f"Twelve Data connection error: {str(e)}"
+
+            detail={
+                "provider":
+                    "Twelve Data",
+
+                "endpoint":
+                    endpoint,
+
+                "error":
+                    str(e)
+            }
         )
+
+
+    try:
+
+        data = response.json()
+
+    except Exception:
+
+        data = {
+            "raw":
+                response.text
+        }
+
 
     if response.status_code != 200:
+
         raise HTTPException(
+
             status_code=response.status_code,
-            detail=response.text
+
+            detail={
+                "provider":
+                    "Twelve Data",
+
+                "endpoint":
+                    endpoint,
+
+                "http_status":
+                    response.status_code,
+
+                "response":
+                    data
+            }
         )
 
-    try:
-        data = response.json()
-    except Exception:
-        raise HTTPException(
-            status_code=502,
-            detail="Invalid JSON response from Twelve Data"
-        )
 
-    if data.get("status") == "error":
+    if data.get(
+        "status"
+    ) == "error":
+
         raise HTTPException(
+
             status_code=400,
-            detail=str(data)
+
+            detail={
+                "provider":
+                    "Twelve Data",
+
+                "endpoint":
+                    endpoint,
+
+                "response":
+                    data
+            }
         )
 
-    if data.get("code") and data.get("code") != 200:
-        raise HTTPException(
-            status_code=400,
-            detail=str(data)
-        )
 
     return data
 
 
-def get_quote(symbol):
-    symbol = normalize_symbol(symbol)
+# ============================================================
+# QUOTE
+# ============================================================
 
-    return td(
+def get_quote(
+    symbol
+):
+
+    return twelve_data(
+
         "quote",
+
         {
-            "symbol": symbol
+            "symbol":
+                normalize_symbol(
+                    symbol
+                )
         }
+
     )
 
 
-def get_candles(symbol, interval, outputsize):
-    symbol = normalize_symbol(symbol)
+# ============================================================
+# HISTORICAL CANDLES
+# ============================================================
 
-    data = td(
+def get_candles(
+    symbol,
+    interval,
+    outputsize
+):
+
+    normalized = normalize_symbol(
+        symbol
+    )
+
+
+    data = twelve_data(
+
         "time_series",
+
         {
-            "symbol": symbol,
-            "interval": interval,
-            "outputsize": outputsize,
-            "timezone": "Europe/Berlin"
+
+            "symbol":
+                normalized,
+
+            "interval":
+                interval,
+
+            "outputsize":
+                outputsize,
+
+            "timezone":
+                "Europe/Berlin"
+
         }
+
     )
 
-    values = data.get("values", [])
+
+    values = data.get(
+        "values",
+        []
+    )
+
 
     if not values:
+
         raise HTTPException(
+
             status_code=404,
-            detail=f"No candle data returned for {symbol} {interval}"
+
+            detail={
+
+                "provider":
+                    "Twelve Data",
+
+                "endpoint":
+                    "time_series",
+
+                "symbol":
+                    normalized,
+
+                "interval":
+                    interval,
+
+                "error":
+                    "No historical candles returned",
+
+                "response":
+                    data
+            }
+
         )
+
 
     candles = []
 
-    for x in values:
+
+    for item in values:
+
         try:
+
             volume = None
 
-            if x.get("volume") not in (
+            if item.get(
+                "volume"
+            ) not in (
                 None,
                 "",
                 "0",
                 0
             ):
-                volume = float(x["volume"])
+
+                volume = float(
+                    item["volume"]
+                )
+
 
             candles.append({
-                "datetime": x["datetime"],
-                "open": float(x["open"]),
-                "high": float(x["high"]),
-                "low": float(x["low"]),
-                "close": float(x["close"]),
-                "volume": volume
+
+                "datetime":
+                    item["datetime"],
+
+                "open":
+                    float(
+                        item["open"]
+                    ),
+
+                "high":
+                    float(
+                        item["high"]
+                    ),
+
+                "low":
+                    float(
+                        item["low"]
+                    ),
+
+                "close":
+                    float(
+                        item["close"]
+                    ),
+
+                "volume":
+                    volume
+
             })
 
-        except (ValueError, TypeError, KeyError):
+
+        except Exception:
+
             continue
+
 
     candles.reverse()
 
+
     if not candles:
+
         raise HTTPException(
+
             status_code=404,
-            detail=f"Unable to parse candles for {symbol} {interval}"
+
+            detail={
+
+                "provider":
+                    "Twelve Data",
+
+                "symbol":
+                    normalized,
+
+                "interval":
+                    interval,
+
+                "error":
+                    "Candles could not be parsed"
+            }
+
         )
+
 
     return candles
 
 
 # ============================================================
-# HELPERS
+# MATH
 # ============================================================
 
-def parse_dt(value):
-    return datetime.strptime(
-        value,
-        "%Y-%m-%d %H:%M:%S"
-    ).replace(tzinfo=TZ)
+def average(
+    values
+):
 
-
-def average(values):
     values = [
-        x for x in values
+
+        x
+        for x in values
         if x is not None
+
     ]
 
     if not values:
+
         return None
 
-    return sum(values) / len(values)
 
-
-def safe_distance(price, level):
-    if level is None:
-        return None
-
-    return price - level
-
-
-def nearest_above(price, levels):
-    valid = [
-        x for x in levels
-        if x is not None and x > price
-    ]
-
-    return min(valid) if valid else None
-
-
-def nearest_below(price, levels):
-    valid = [
-        x for x in levels
-        if x is not None and x < price
-    ]
-
-    return max(valid) if valid else None
+    return (
+        sum(values)
+        / len(values)
+    )
 
 
 # ============================================================
 # EMA
 # ============================================================
 
-def ema(values, period):
+def ema(
+    values,
+    period
+):
+
     if len(values) < period:
+
         return None
 
-    result = sum(values[:period]) / period
-    multiplier = 2 / (period + 1)
+
+    result = (
+        sum(
+            values[:period]
+        )
+        / period
+    )
+
+
+    multiplier = (
+        2
+        / (period + 1)
+    )
+
 
     for value in values[period:]:
+
         result = (
-            value * multiplier
-            + result * (1 - multiplier)
+
+            value
+            * multiplier
+
+            +
+
+            result
+            * (1 - multiplier)
+
         )
+
 
     return result
 
@@ -235,71 +492,160 @@ def ema(values, period):
 # RSI
 # ============================================================
 
-def rsi(values, period=14):
+def rsi(
+    values,
+    period=14
+):
+
     if len(values) <= period:
+
         return None
+
 
     gains = []
     losses = []
 
-    for i in range(1, len(values)):
-        change = values[i] - values[i - 1]
 
-        gains.append(max(change, 0))
-        losses.append(max(-change, 0))
+    for i in range(
+        1,
+        len(values)
+    ):
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
+        change = (
+            values[i]
+            - values[i - 1]
+        )
 
-    for i in range(period, len(gains)):
+
+        gains.append(
+            max(change, 0)
+        )
+
+
+        losses.append(
+            max(-change, 0)
+        )
+
+
+    avg_gain = (
+        sum(
+            gains[:period]
+        )
+        / period
+    )
+
+
+    avg_loss = (
+        sum(
+            losses[:period]
+        )
+        / period
+    )
+
+
+    for i in range(
+        period,
+        len(gains)
+    ):
+
         avg_gain = (
-            avg_gain * (period - 1)
+
+            (
+                avg_gain
+                * (period - 1)
+            )
+
             + gains[i]
+
         ) / period
+
 
         avg_loss = (
-            avg_loss * (period - 1)
+
+            (
+                avg_loss
+                * (period - 1)
+            )
+
             + losses[i]
+
         ) / period
 
+
     if avg_loss == 0:
+
         return 100.0
 
-    rs = avg_gain / avg_loss
 
-    return 100 - (100 / (1 + rs))
+    rs = (
+        avg_gain
+        / avg_loss
+    )
+
+
+    return (
+        100
+        - (
+            100
+            / (1 + rs)
+        )
+    )
 
 
 # ============================================================
 # ATR
 # ============================================================
 
-def atr(candles, period=14):
+def atr(
+    candles,
+    period=14
+):
+
     if len(candles) <= period:
+
         return None
 
-    true_ranges = []
 
-    for i in range(1, len(candles)):
+    ranges = []
+
+
+    for i in range(
+        1,
+        len(candles)
+    ):
+
         current = candles[i]
-        previous = candles[i - 1]
 
-        tr = max(
-            current["high"] - current["low"],
+        previous = candles[
+            i - 1
+        ]
+
+
+        true_range = max(
+
+            current["high"]
+            - current["low"],
+
             abs(
                 current["high"]
                 - previous["close"]
             ),
+
             abs(
                 current["low"]
                 - previous["close"]
             )
+
         )
 
-        true_ranges.append(tr)
+
+        ranges.append(
+            true_range
+        )
+
 
     return average(
-        true_ranges[-period:]
+        ranges[-period:]
     )
 
 
@@ -307,101 +653,190 @@ def atr(candles, period=14):
 # VWAP
 # ============================================================
 
-def vwap(candles):
+def vwap(
+    candles
+):
+
     usable = [
-        x for x in candles
-        if x["volume"] is not None
+
+        candle
+
+        for candle in candles
+
+        if candle["volume"]
+        is not None
+
     ]
 
+
     if not usable:
+
         return None
+
 
     total_pv = 0
     total_volume = 0
 
+
     for candle in usable:
 
         typical_price = (
+
             candle["high"]
             + candle["low"]
             + candle["close"]
+
         ) / 3
 
+
         total_pv += (
+
             typical_price
             * candle["volume"]
+
         )
 
-        total_volume += candle["volume"]
+
+        total_volume += (
+            candle["volume"]
+        )
+
 
     if total_volume == 0:
+
         return None
 
-    return total_pv / total_volume
+
+    return (
+        total_pv
+        / total_volume
+    )
+
+
+# ============================================================
+# DATETIME
+# ============================================================
+
+def parse_dt(
+    value
+):
+
+    return datetime.strptime(
+
+        value,
+
+        "%Y-%m-%d %H:%M:%S"
+
+    ).replace(
+        tzinfo=TZ
+    )
 
 
 # ============================================================
 # SWINGS
 # ============================================================
 
-def find_swings(candles, strength=2):
+def find_swings(
+    candles,
+    strength=2
+):
 
     highs = []
     lows = []
 
-    if len(candles) < strength * 2 + 1:
+
+    if len(candles) < (
+        strength * 2 + 1
+    ):
+
         return highs, lows
 
+
     for i in range(
+
         strength,
-        len(candles) - strength
+
+        len(candles)
+        - strength
+
     ):
 
         current = candles[i]
 
+
         left = candles[
-            i - strength:i
+
+            i - strength:
+            i
+
         ]
+
 
         right = candles[
-            i + 1:i + strength + 1
+
+            i + 1:
+            i + strength + 1
+
         ]
 
-        left_high = max(
-            x["high"] for x in left
-        )
-
-        right_high = max(
-            x["high"] for x in right
-        )
-
-        left_low = min(
-            x["low"] for x in left
-        )
-
-        right_low = min(
-            x["low"] for x in right
-        )
 
         if (
-            current["high"] >= left_high
-            and current["high"] >= right_high
+
+            current["high"]
+            >= max(
+                x["high"]
+                for x in left
+            )
+
+            and
+
+            current["high"]
+            >= max(
+                x["high"]
+                for x in right
+            )
+
         ):
+
             highs.append({
-                "price": current["high"],
-                "datetime": current["datetime"],
-                "index": i
+
+                "price":
+                    current["high"],
+
+                "datetime":
+                    current["datetime"]
+
             })
 
+
         if (
-            current["low"] <= left_low
-            and current["low"] <= right_low
+
+            current["low"]
+            <= min(
+                x["low"]
+                for x in left
+            )
+
+            and
+
+            current["low"]
+            <= min(
+                x["low"]
+                for x in right
+            )
+
         ):
+
             lows.append({
-                "price": current["low"],
-                "datetime": current["datetime"],
-                "index": i
+
+                "price":
+                    current["low"],
+
+                "datetime":
+                    current["datetime"]
+
             })
+
 
     return highs, lows
 
@@ -410,114 +845,263 @@ def find_swings(candles, strength=2):
 # MARKET STRUCTURE
 # ============================================================
 
-def market_structure(candles):
+def market_structure(
+    candles
+):
 
-    highs, lows = find_swings(candles)
+    highs, lows = find_swings(
+        candles
+    )
 
-    recent_highs = highs[-8:]
-    recent_lows = lows[-8:]
+
+    highs = highs[-8:]
+    lows = lows[-8:]
+
 
     if (
-        len(recent_highs) < 2
-        or len(recent_lows) < 2
+
+        len(highs) < 2
+
+        or
+
+        len(lows) < 2
+
     ):
+
         return {
-            "bias": "unknown",
-            "HH": False,
-            "HL": False,
-            "LH": False,
-            "LL": False,
-            "BOS": None,
-            "CHoCH": None,
-            "recent_high": None,
-            "recent_low": None,
-            "swing_highs": [],
-            "swing_lows": []
+
+            "bias":
+                "unknown",
+
+            "HH":
+                False,
+
+            "HL":
+                False,
+
+            "LH":
+                False,
+
+            "LL":
+                False,
+
+            "BOS":
+                None,
+
+            "CHoCH":
+                None,
+
+            "recent_high":
+                None,
+
+            "recent_low":
+                None
+
         }
 
-    previous_high = recent_highs[-2]["price"]
-    latest_high = recent_highs[-1]["price"]
 
-    previous_low = recent_lows[-2]["price"]
-    latest_low = recent_lows[-1]["price"]
+    previous_high = highs[-2][
+        "price"
+    ]
 
-    HH = latest_high > previous_high
-    LH = latest_high < previous_high
 
-    HL = latest_low > previous_low
-    LL = latest_low < previous_low
+    latest_high = highs[-1][
+        "price"
+    ]
+
+
+    previous_low = lows[-2][
+        "price"
+    ]
+
+
+    latest_low = lows[-1][
+        "price"
+    ]
+
+
+    HH = (
+        latest_high
+        > previous_high
+    )
+
+
+    LH = (
+        latest_high
+        < previous_high
+    )
+
+
+    HL = (
+        latest_low
+        > previous_low
+    )
+
+
+    LL = (
+        latest_low
+        < previous_low
+    )
+
 
     if HH and HL:
+
         bias = "bullish"
+
     elif LH and LL:
+
         bias = "bearish"
+
     else:
+
         bias = "range"
 
-    current_price = candles[-1]["close"]
+
+    price = candles[-1][
+        "close"
+    ]
+
 
     BOS = None
 
-    if current_price > latest_high:
+
+    if price > latest_high:
+
         BOS = "bullish"
 
-    elif current_price < latest_low:
+    elif price < latest_low:
+
         BOS = "bearish"
+
 
     CHoCH = None
 
-    if bias == "bearish" and current_price > previous_high:
+
+    if (
+
+        bias == "bearish"
+
+        and
+
+        price > previous_high
+
+    ):
+
         CHoCH = "bullish"
 
-    elif bias == "bullish" and current_price < previous_low:
+
+    elif (
+
+        bias == "bullish"
+
+        and
+
+        price < previous_low
+
+    ):
+
         CHoCH = "bearish"
 
+
     return {
-        "bias": bias,
-        "HH": HH,
-        "HL": HL,
-        "LH": LH,
-        "LL": LL,
-        "BOS": BOS,
-        "CHoCH": CHoCH,
-        "recent_high": latest_high,
-        "recent_low": latest_low,
-        "swing_highs": recent_highs[-5:],
-        "swing_lows": recent_lows[-5:]
+
+        "bias":
+            bias,
+
+        "HH":
+            HH,
+
+        "HL":
+            HL,
+
+        "LH":
+            LH,
+
+        "LL":
+            LL,
+
+        "BOS":
+            BOS,
+
+        "CHoCH":
+            CHoCH,
+
+        "recent_high":
+            latest_high,
+
+        "recent_low":
+            latest_low
+
     }
 
 
 # ============================================================
-# EQUAL HIGHS / LOWS
+# EQUAL LEVELS
 # ============================================================
 
-def equal_levels(points, tolerance=0.0005):
+def equal_levels(
+    points,
+    tolerance=0.0005
+):
 
     result = []
 
-    for i in range(len(points)):
 
-        for j in range(i + 1, len(points)):
+    for i in range(
+        len(points)
+    ):
 
-            a = points[i]["price"]
-            b = points[j]["price"]
+        for j in range(
+            i + 1,
+            len(points)
+        ):
+
+            a = points[i][
+                "price"
+            ]
+
+            b = points[j][
+                "price"
+            ]
+
 
             denominator = max(
+
                 abs(a),
                 abs(b),
                 1e-12
+
             )
 
+
             if (
+
                 abs(a - b)
                 / denominator
+
                 <= tolerance
+
             ):
+
                 result.append({
-                    "level": (a + b) / 2,
-                    "first": points[i]["datetime"],
-                    "second": points[j]["datetime"]
+
+                    "level":
+                        (
+                            a + b
+                        ) / 2,
+
+                    "first":
+                        points[i][
+                            "datetime"
+                        ],
+
+                    "second":
+                        points[j][
+                            "datetime"
+                        ]
+
                 })
+
 
     return result[-10:]
 
@@ -526,36 +1110,53 @@ def equal_levels(points, tolerance=0.0005):
 # LIQUIDITY
 # ============================================================
 
-def liquidity(candles):
+def liquidity(
+    candles
+):
 
-    highs, lows = find_swings(candles)
+    highs, lows = find_swings(
+        candles
+    )
 
-    equal_highs = equal_levels(highs)
-    equal_lows = equal_levels(lows)
-
-    recent_highs = [
-        x["price"]
-        for x in highs[-10:]
-    ]
-
-    recent_lows = [
-        x["price"]
-        for x in lows[-10:]
-    ]
 
     return {
-        "equal_highs": equal_highs,
-        "equal_lows": equal_lows,
-        "buy_side_liquidity": (
-            max(recent_highs)
-            if recent_highs
-            else None
-        ),
-        "sell_side_liquidity": (
-            min(recent_lows)
-            if recent_lows
-            else None
-        )
+
+        "equal_highs":
+            equal_levels(
+                highs
+            ),
+
+        "equal_lows":
+            equal_levels(
+                lows
+            ),
+
+        "buy_side_liquidity":
+
+            (
+                max(
+                    x["price"]
+                    for x in highs[-10:]
+                )
+
+                if highs
+
+                else None
+            ),
+
+        "sell_side_liquidity":
+
+            (
+                min(
+                    x["price"]
+                    for x in lows[-10:]
+                )
+
+                if lows
+
+                else None
+            )
+
     }
 
 
@@ -563,49 +1164,92 @@ def liquidity(candles):
 # FVG
 # ============================================================
 
-def find_fvg(candles):
+def fvg(
+    candles
+):
 
     bullish = []
     bearish = []
+
 
     for i in range(
         2,
         len(candles)
     ):
 
-        first = candles[i - 2]
-        middle = candles[i - 1]
+        first = candles[
+            i - 2
+        ]
+
+        middle = candles[
+            i - 1
+        ]
+
         third = candles[i]
 
-        # Bullish FVG
-        if first["high"] < third["low"]:
+
+        if (
+
+            first["high"]
+            < third["low"]
+
+        ):
 
             bullish.append({
-                "low": first["high"],
-                "high": third["low"],
-                "size": (
-                    third["low"]
-                    - first["high"]
-                ),
-                "datetime": middle["datetime"]
+
+                "low":
+                    first["high"],
+
+                "high":
+                    third["low"],
+
+                "size":
+                    (
+                        third["low"]
+                        - first["high"]
+                    ),
+
+                "datetime":
+                    middle["datetime"]
+
             })
 
-        # Bearish FVG
-        if first["low"] > third["high"]:
+
+        if (
+
+            first["low"]
+            > third["high"]
+
+        ):
 
             bearish.append({
-                "low": third["high"],
-                "high": first["low"],
-                "size": (
-                    first["low"]
-                    - third["high"]
-                ),
-                "datetime": middle["datetime"]
+
+                "low":
+                    third["high"],
+
+                "high":
+                    first["low"],
+
+                "size":
+                    (
+                        first["low"]
+                        - third["high"]
+                    ),
+
+                "datetime":
+                    middle["datetime"]
+
             })
 
+
     return {
-        "bullish": bullish[-10:],
-        "bearish": bearish[-10:]
+
+        "bullish":
+            bullish[-10:],
+
+        "bearish":
+            bearish[-10:]
+
     }
 
 
@@ -613,52 +1257,161 @@ def find_fvg(candles):
 # DISPLACEMENT
 # ============================================================
 
-def displacement(candles):
+def displacement(
+    candles
+):
 
     current = candles[-1]
+
 
     current_atr = atr(
         candles,
         14
     )
 
+
     if not current_atr:
+
         return {
-            "detected": False,
-            "direction": None,
-            "body": None,
-            "atr_multiple": None
+
+            "detected":
+                False,
+
+            "direction":
+                None,
+
+            "atr_multiple":
+                None
+
         }
 
+
     body = abs(
+
         current["close"]
         - current["open"]
+
     )
 
-    multiple = body / current_atr
 
-    direction = (
-        "bullish"
-        if current["close"]
-        > current["open"]
-        else "bearish"
+    multiple = (
+        body
+        / current_atr
     )
+
 
     return {
-        "detected": multiple >= 1.5,
-        "direction": direction,
-        "body": body,
-        "atr_multiple": multiple
+
+        "detected":
+            multiple >= 1.5,
+
+        "direction":
+
+            (
+                "bullish"
+
+                if current["close"]
+                > current["open"]
+
+                else "bearish"
+            ),
+
+        "atr_multiple":
+            multiple
+
     }
 
 
 # ============================================================
-# DAILY DATA
+# TIMEFRAME ANALYSIS
 # ============================================================
 
-def build_daily_stats(candles):
+def timeframe_analysis(
+    candles
+):
 
-    grouped = {}
+    closes = [
+
+        candle["close"]
+
+        for candle in candles
+
+    ]
+
+
+    return {
+
+        "price":
+            closes[-1],
+
+        "EMA21":
+            ema(
+                closes,
+                21
+            ),
+
+        "EMA50":
+            ema(
+                closes,
+                50
+            ),
+
+        "EMA200":
+            ema(
+                closes,
+                200
+            ),
+
+        "RSI14":
+            rsi(
+                closes,
+                14
+            ),
+
+        "ATR14":
+            atr(
+                candles,
+                14
+            ),
+
+        "VWAP":
+            vwap(
+                candles
+            ),
+
+        "structure":
+            market_structure(
+                candles
+            ),
+
+        "liquidity":
+            liquidity(
+                candles
+            ),
+
+        "FVG":
+            fvg(
+                candles
+            ),
+
+        "displacement":
+            displacement(
+                candles
+            )
+
+    }
+
+
+# ============================================================
+# DAILY STATS
+# ============================================================
+
+def daily_stats(
+    candles
+):
+
+    groups = {}
+
 
     for candle in candles:
 
@@ -666,46 +1419,83 @@ def build_daily_stats(candles):
             candle["datetime"]
         ).date()
 
-        grouped.setdefault(
+
+        groups.setdefault(
             date,
             []
-        ).append(candle)
+        ).append(
+            candle
+        )
+
 
     result = []
 
-    for date in sorted(grouped):
 
-        day = grouped[date]
+    for date in sorted(
+        groups
+    ):
+
+        day = groups[
+            date
+        ]
+
 
         result.append({
-            "date": str(date),
-            "open": day[0]["open"],
-            "high": max(
-                x["high"] for x in day
-            ),
-            "low": min(
-                x["low"] for x in day
-            ),
-            "close": day[-1]["close"]
+
+            "date":
+                str(date),
+
+            "open":
+                day[0]["open"],
+
+            "high":
+                max(
+                    x["high"]
+                    for x in day
+                ),
+
+            "low":
+                min(
+                    x["low"]
+                    for x in day
+                ),
+
+            "close":
+                day[-1]["close"]
+
         })
+
 
     return result
 
 
+# ============================================================
+# ADR
+# ============================================================
+
 def calculate_adr(
-    daily_data,
+    days,
     period
 ):
 
-    if len(daily_data) < period:
+    if len(days) < period:
+
         return None
 
+
     ranges = [
-        x["high"] - x["low"]
-        for x in daily_data[-period:]
+
+        x["high"]
+        - x["low"]
+
+        for x in days[-period:]
+
     ]
 
-    return average(ranges)
+
+    return average(
+        ranges
+    )
 
 
 # ============================================================
@@ -714,49 +1504,81 @@ def calculate_adr(
 
 def session_range(
     candles,
-    day,
+    date,
     start_hour,
     end_hour
 ):
 
     selected = []
 
+
     for candle in candles:
 
-        candle_dt = parse_dt(
+        dt = parse_dt(
             candle["datetime"]
         )
 
-        if candle_dt.date() != day:
+
+        if dt.date() != date:
+
             continue
 
-        hour = candle_dt.hour
 
         if (
-            hour >= start_hour
-            and hour < end_hour
+
+            dt.hour
+            >= start_hour
+
+            and
+
+            dt.hour
+            < end_hour
+
         ):
-            selected.append(candle)
+
+            selected.append(
+                candle
+            )
+
 
     if not selected:
+
         return None
+
 
     high = max(
         x["high"]
         for x in selected
     )
 
+
     low = min(
         x["low"]
         for x in selected
     )
 
+
     return {
-        "high": high,
-        "low": low,
-        "range": high - low,
-        "start": selected[0]["datetime"],
-        "end": selected[-1]["datetime"]
+
+        "high":
+            high,
+
+        "low":
+            low,
+
+        "range":
+            high - low,
+
+        "start":
+            selected[0][
+                "datetime"
+            ],
+
+        "end":
+            selected[-1][
+                "datetime"
+            ]
+
     }
 
 
@@ -764,958 +1586,509 @@ def session_range(
 # PIVOTS
 # ============================================================
 
-def calculate_pivots(previous_day):
+def calculate_pivots(
+    previous_day
+):
 
     if not previous_day:
+
         return None
 
-    high = previous_day["high"]
-    low = previous_day["low"]
-    close = previous_day["close"]
+
+    high = previous_day[
+        "high"
+    ]
+
+    low = previous_day[
+        "low"
+    ]
+
+    close = previous_day[
+        "close"
+    ]
+
 
     pivot = (
+
         high
         + low
         + close
+
     ) / 3
 
+
     return {
-        "pivot": pivot,
 
-        "R1": (
-            2 * pivot
-            - low
-        ),
+        "pivot":
+            pivot,
 
-        "R2": (
-            pivot
-            + high
-            - low
-        ),
+        "R1":
+            2 * pivot - low,
 
-        "R3": (
+        "R2":
+            pivot + high - low,
+
+        "R3":
             high
             + 2 * (
-                pivot
-                - low
-            )
-        ),
+                pivot - low
+            ),
 
-        "S1": (
-            2 * pivot
-            - high
-        ),
+        "S1":
+            2 * pivot - high,
 
-        "S2": (
-            pivot
-            - high
-            + low
-        ),
+        "S2":
+            pivot - high + low,
 
-        "S3": (
+        "S3":
             low
             - 2 * (
-                high
-                - pivot
+                high - pivot
             )
-        )
+
     }
 
 
 # ============================================================
-# RANGE CONTEXT
+# BUILD MARKET DATA
+#
+# HISTORICAL CANDLES FIRST.
+# LIVE QUOTE IS OPTIONAL.
+#
+# IMPORTANT:
+# If the market is closed and the live quote is unavailable,
+# historical data is still used.
 # ============================================================
 
-def range_context(
-    price,
-    high,
-    low
+def build_market_data(
+    display_symbol,
+    api_symbol
 ):
-
-    if (
-        high is None
-        or low is None
-        or high == low
-    ):
-        return {
-            "position_percent": None,
-            "zone": "unknown",
-            "premium_discount": "unknown"
-        }
-
-    position = (
-        (price - low)
-        / (high - low)
-    ) * 100
-
-    if position <= 30:
-        zone = "lower_range"
-
-    elif position >= 70:
-        zone = "upper_range"
-
-    else:
-        zone = "middle_range"
-
-    if position < 50:
-        pd = "discount"
-
-    elif position > 50:
-        pd = "premium"
-
-    else:
-        pd = "equilibrium"
-
-    return {
-        "position_percent": position,
-        "zone": zone,
-        "premium_discount": pd
-    }
-
-
-# ============================================================
-# TIMEFRAME PACKAGE
-# ============================================================
-
-def timeframe_package(candles):
-
-    closes = [
-        x["close"]
-        for x in candles
-    ]
-
-    return {
-        "price": closes[-1],
-
-        "high_100": max(
-            x["high"]
-            for x in candles[-100:]
-        ),
-
-        "low_100": min(
-            x["low"]
-            for x in candles[-100:]
-        ),
-
-        "EMA21": ema(
-            closes,
-            21
-        ),
-
-        "EMA50": ema(
-            closes,
-            50
-        ),
-
-        "EMA200": ema(
-            closes,
-            200
-        ),
-
-        "RSI14": rsi(
-            closes,
-            14
-        ),
-
-        "ATR14": atr(
-            candles,
-            14
-        ),
-
-        "VWAP": vwap(
-            candles
-        ),
-
-        "structure": market_structure(
-            candles
-        ),
-
-        "liquidity": liquidity(
-            candles
-        ),
-
-        "FVG": find_fvg(
-            candles
-        ),
-
-        "displacement": displacement(
-            candles
-        )
-    }
-
-
-# ============================================================
-# SETUP ENGINE
-# ============================================================
-
-def setup_engine(
-    price,
-    bias,
-    levels,
-    adr14
-):
-
-    setups = []
-
-    resistance = nearest_above(
-        price,
-        [
-            levels.get("previous_day_high"),
-            levels.get("asia_high"),
-            levels.get("london_high"),
-            levels.get("R1"),
-            levels.get("R2"),
-            levels.get("R3")
-        ]
-    )
-
-    support = nearest_below(
-        price,
-        [
-            levels.get("previous_day_low"),
-            levels.get("asia_low"),
-            levels.get("london_low"),
-            levels.get("S1"),
-            levels.get("S2"),
-            levels.get("S3")
-        ]
-    )
-
-    # ---------------- LONG ----------------
-
-    if (
-        bias in (
-            "bullish",
-            "neutral"
-        )
-        and support is not None
-        and support < price
-    ):
-
-        base_risk = (
-            price - support
-        )
-
-        if adr14:
-            base_risk = max(
-                base_risk,
-                adr14 * 0.05
-            )
-
-        sl = support - (
-            base_risk * 0.5
-        )
-
-        tp1 = (
-            resistance
-            if (
-                resistance is not None
-                and resistance > price
-            )
-            else price + base_risk
-        )
-
-        tp2 = price + (
-            base_risk * 2
-        )
-
-        tp3 = price + (
-            base_risk * 3
-        )
-
-        rr = (
-            (tp1 - price)
-            / (price - sl)
-            if price != sl
-            else None
-        )
-
-        setups.append({
-            "type": "LONG_PULLBACK",
-            "entry": price,
-            "entry_zone": support,
-            "SL": sl,
-            "TP1": tp1,
-            "TP2": tp2,
-            "TP3": tp3,
-            "RR_to_TP1": rr,
-            "condition": (
-                "Bullish confirmation "
-                "at support/liquidity"
-            ),
-            "invalidation": sl
-        })
-
-    # ---------------- SHORT ----------------
-
-    if (
-        bias in (
-            "bearish",
-            "neutral"
-        )
-        and resistance is not None
-        and resistance > price
-    ):
-
-        base_risk = (
-            resistance - price
-        )
-
-        if adr14:
-            base_risk = max(
-                base_risk,
-                adr14 * 0.05
-            )
-
-        sl = resistance + (
-            base_risk * 0.5
-        )
-
-        tp1 = (
-            support
-            if (
-                support is not None
-                and support < price
-            )
-            else price - base_risk
-        )
-
-        tp2 = price - (
-            base_risk * 2
-        )
-
-        tp3 = price - (
-            base_risk * 3
-        )
-
-        rr = (
-            (price - tp1)
-            / (sl - price)
-            if sl != price
-            else None
-        )
-
-        setups.append({
-            "type": "SHORT_PULLBACK",
-            "entry": price,
-            "entry_zone": resistance,
-            "SL": sl,
-            "TP1": tp1,
-            "TP2": tp2,
-            "TP3": tp3,
-            "RR_to_TP1": rr,
-            "condition": (
-                "Bearish confirmation "
-                "at resistance/liquidity"
-            ),
-            "invalidation": sl
-        })
-
-    return setups
-
-
-# ============================================================
-# CONFIDENCE
-# ============================================================
-
-def calculate_confidence(
-    overall_bias,
-    timeframe_biases,
-    range_zone
-):
-
-    score = 50
-
-    if overall_bias in (
-        "bullish",
-        "bearish"
-    ):
-        score += 10
-
-    aligned = sum(
-        1
-        for x in timeframe_biases.values()
-        if x == overall_bias
-    )
-
-    if aligned >= 4:
-        score += 20
-
-    elif aligned >= 3:
-        score += 10
-
-    if range_zone == "middle_range":
-        score -= 20
-
-    elif range_zone in (
-        "upper_range",
-        "lower_range"
-    ):
-        score += 5
-
-    return max(
-        0,
-        min(100, score)
-    )
-
-
-# ============================================================
-# ROOT
-# ============================================================
-
-@app.get("/")
-def root():
-
-    return {
-        "status": "online",
-        "service": "Trading AI Market API",
-        "version": "3.1"
-    }
-
-
-# ============================================================
-# COMPLETE ANALYSIS ENDPOINT
-# ============================================================
-
-@app.get("/analysis-data")
-@app.get("/getAnalysisData")
-def analysis_data(symbol: str):
-
-    original_symbol = symbol
-
-    symbol = normalize_symbol(symbol)
 
     # --------------------------------------------------------
-    # CURRENT QUOTE
+    # HISTORICAL DATA
     # --------------------------------------------------------
 
-    quote = get_quote(symbol)
+    intervals = {
+
+        "1m":
+            (
+                "1min",
+                500
+            ),
+
+        "5m":
+            (
+                "5min",
+                1000
+            ),
+
+        "15m":
+            (
+                "15min",
+                500
+            ),
+
+        "1H":
+            (
+                "1h",
+                500
+            ),
+
+        "4H":
+            (
+                "4h",
+                300
+            ),
+
+        "1D":
+            (
+                "1day",
+                100
+            )
+
+    }
+
+
+    candles = {}
+
+
+    for tf, (
+        interval,
+        outputsize
+    ) in intervals.items():
+
+        candles[tf] = get_candles(
+
+            api_symbol,
+
+            interval,
+
+            outputsize
+
+        )
+
+
+    # --------------------------------------------------------
+    # LAST HISTORICAL CANDLE
+    # --------------------------------------------------------
+
+    last_candle = candles[
+        "1m"
+    ][-1]
+
+
+    historical_price = (
+        last_candle["close"]
+    )
+
+
+    last_candle_time = (
+        last_candle["datetime"]
+    )
+
+
+    # --------------------------------------------------------
+    # OPTIONAL LIVE QUOTE
+    # --------------------------------------------------------
+
+    live_price = None
+
+    quote_error = None
+
 
     try:
-        current_price = float(
-            quote["close"]
-        )
-    except (
-        KeyError,
-        TypeError,
-        ValueError
-    ):
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "Invalid quote",
-                "symbol": symbol,
-                "response": quote
-            }
+
+        quote = get_quote(
+            api_symbol
         )
 
+
+        if quote.get(
+            "close"
+        ) is not None:
+
+            live_price = float(
+                quote["close"]
+            )
+
+
+    except Exception as e:
+
+        quote_error = str(e)
+
+
     # --------------------------------------------------------
-    # MULTI-TIMEFRAME DATA
+    # PRICE SOURCE
     # --------------------------------------------------------
 
-    candles_1m = get_candles(
-        symbol,
-        "1min",
-        1500
-    )
+    if live_price is not None:
 
-    candles_5m = get_candles(
-        symbol,
-        "5min",
-        5000
-    )
+        price = live_price
 
-    candles_15m = get_candles(
-        symbol,
-        "15min",
-        2500
-    )
+        market_status = "OPEN"
 
-    candles_1h = get_candles(
-        symbol,
-        "1h",
-        1200
-    )
+        price_source = (
+            "LIVE_QUOTE"
+        )
 
-    candles_4h = get_candles(
-        symbol,
-        "4h",
-        600
-    )
+    else:
 
-    candles_1d = get_candles(
-        symbol,
-        "1day",
-        100
-    )
+        price = historical_price
+
+        market_status = (
+            "CLOSED_OR_"
+            "LIVE_QUOTE_UNAVAILABLE"
+        )
+
+        price_source = (
+            "LAST_COMPLETED_CANDLE"
+        )
+
 
     # --------------------------------------------------------
     # DAILY DATA
     # --------------------------------------------------------
 
-    daily = build_daily_stats(
-        candles_5m
+    daily = daily_stats(
+        candles["5m"]
     )
 
+
     if not daily:
+
         raise HTTPException(
+
             status_code=404,
-            detail="No daily data available"
+
+            detail={
+
+                "provider":
+                    "Twelve Data",
+
+                "symbol":
+                    api_symbol,
+
+                "error":
+                    "Historical daily data unavailable"
+
+            }
+
         )
+
 
     current_day = daily[-1]
 
+
     previous_day = (
+
         daily[-2]
+
         if len(daily) >= 2
+
         else None
+
     )
 
-    current_daily_range = (
+
+    current_range = (
+
         current_day["high"]
         - current_day["low"]
+
     )
+
 
     ADR5 = calculate_adr(
         daily[:-1],
         5
     )
 
+
     ADR10 = calculate_adr(
         daily[:-1],
         10
     )
+
 
     ADR14 = calculate_adr(
         daily[:-1],
         14
     )
 
+
     ADR20 = calculate_adr(
         daily[:-1],
         20
     )
 
-    daily_range_context = range_context(
-        current_price,
-        current_day["high"],
-        current_day["low"]
-    )
 
     # --------------------------------------------------------
-    # SESSION DATA
+    # SESSIONS
     # --------------------------------------------------------
 
-    berlin_now = datetime.now(TZ)
+    berlin_date = datetime.now(
+        TZ
+    ).date()
 
-    session_day = berlin_now.date()
 
     asia = session_range(
-        candles_5m,
-        session_day,
+
+        candles["5m"],
+
+        berlin_date,
+
         0,
+
         9
+
     )
+
 
     london = session_range(
-        candles_5m,
-        session_day,
+
+        candles["5m"],
+
+        berlin_date,
+
         9,
+
         12
+
     )
 
-    london_extended = session_range(
-        candles_5m,
-        session_day,
-        9,
-        18
-    )
 
     # --------------------------------------------------------
     # PIVOTS
     # --------------------------------------------------------
 
-    pivot_data = calculate_pivots(
+    pivots = calculate_pivots(
         previous_day
     )
 
+
     # --------------------------------------------------------
-    # TIMEFRAME ANALYSIS
+    # TIMEFRAMES
     # --------------------------------------------------------
 
-    timeframes = {
+    timeframes = {}
 
-        "1m": timeframe_package(
-            candles_1m
-        ),
 
-        "5m": timeframe_package(
-            candles_5m
-        ),
+    for tf in candles:
 
-        "15m": timeframe_package(
-            candles_15m
-        ),
+        timeframes[tf] = (
 
-        "1H": timeframe_package(
-            candles_1h
-        ),
+            timeframe_analysis(
+                candles[tf]
+            )
 
-        "4H": timeframe_package(
-            candles_4h
-        ),
-
-        "1D": timeframe_package(
-            candles_1d
         )
-    }
 
-    timeframe_biases = {
 
-        "1D":
-            timeframes["1D"]
-            ["structure"]
-            ["bias"],
+    # --------------------------------------------------------
+    # MTF BIAS
+    # --------------------------------------------------------
 
-        "4H":
-            timeframes["4H"]
-            ["structure"]
-            ["bias"],
+    biases = {
 
-        "1H":
-            timeframes["1H"]
-            ["structure"]
-            ["bias"],
-
-        "15m":
-            timeframes["15m"]
-            ["structure"]
-            ["bias"],
-
-        "5m":
-            timeframes["5m"]
-            ["structure"]
-            ["bias"],
-
-        "1m":
-            timeframes["1m"]
+        tf:
+            timeframes[tf]
             ["structure"]
             ["bias"]
+
+        for tf in timeframes
+
     }
 
-    bias_values = list(
-        timeframe_biases.values()
-    )
 
-    bullish_count = bias_values.count(
+    bullish = list(
+        biases.values()
+    ).count(
         "bullish"
     )
 
-    bearish_count = bias_values.count(
+
+    bearish = list(
+        biases.values()
+    ).count(
         "bearish"
     )
 
-    if bullish_count > bearish_count:
+
+    if bullish > bearish:
+
         overall_bias = "bullish"
 
-    elif bearish_count > bullish_count:
+    elif bearish > bullish:
+
         overall_bias = "bearish"
 
     else:
+
         overall_bias = "neutral"
 
-    bias_score = int(
-        (
+
+    # --------------------------------------------------------
+    # RANGE LOCATION
+    # --------------------------------------------------------
+
+    range_position = None
+
+
+    if (
+
+        current_day["high"]
+        != current_day["low"]
+
+    ):
+
+        range_position = (
+
             (
-                bullish_count
-                - bearish_count
+
+                price
+                - current_day["low"]
+
             )
-            / 6
-        )
-        * 100
-    )
 
-    # --------------------------------------------------------
-    # LEVELS
-    # --------------------------------------------------------
+            /
 
-    levels = {
-
-        "previous_day_high":
             (
-                previous_day["high"]
-                if previous_day
-                else None
-            ),
 
-        "previous_day_low":
-            (
-                previous_day["low"]
-                if previous_day
-                else None
-            ),
+                current_day["high"]
+                - current_day["low"]
 
-        "daily_open":
-            current_day["open"],
-
-        "daily_high":
-            current_day["high"],
-
-        "daily_low":
-            current_day["low"],
-
-        "pivot":
-            (
-                pivot_data["pivot"]
-                if pivot_data
-                else None
-            ),
-
-        "R1":
-            (
-                pivot_data["R1"]
-                if pivot_data
-                else None
-            ),
-
-        "R2":
-            (
-                pivot_data["R2"]
-                if pivot_data
-                else None
-            ),
-
-        "R3":
-            (
-                pivot_data["R3"]
-                if pivot_data
-                else None
-            ),
-
-        "S1":
-            (
-                pivot_data["S1"]
-                if pivot_data
-                else None
-            ),
-
-        "S2":
-            (
-                pivot_data["S2"]
-                if pivot_data
-                else None
-            ),
-
-        "S3":
-            (
-                pivot_data["S3"]
-                if pivot_data
-                else None
-            ),
-
-        "asia_high":
-            (
-                asia["high"]
-                if asia
-                else None
-            ),
-
-        "asia_low":
-            (
-                asia["low"]
-                if asia
-                else None
-            ),
-
-        "london_high":
-            (
-                london["high"]
-                if london
-                else None
-            ),
-
-        "london_low":
-            (
-                london["low"]
-                if london
-                else None
             )
-    }
 
-    # --------------------------------------------------------
-    # DISTANCES
-    # --------------------------------------------------------
-
-    distances = {
-        key: safe_distance(
-            current_price,
-            value
-        )
-        for key, value in levels.items()
-    }
-
-    # --------------------------------------------------------
-    # LIQUIDITY
-    # --------------------------------------------------------
-
-    liquidity_data = {
-
-        "5m":
-            timeframes["5m"]
-            ["liquidity"],
-
-        "15m":
-            timeframes["15m"]
-            ["liquidity"],
-
-        "1H":
-            timeframes["1H"]
-            ["liquidity"],
-
-        "4H":
-            timeframes["4H"]
-            ["liquidity"]
-    }
-
-    # --------------------------------------------------------
-    # SETUPS
-    # --------------------------------------------------------
-
-    setups = setup_engine(
-        current_price,
-        overall_bias,
-        levels,
-        ADR14
-    )
-
-    confidence = calculate_confidence(
-        overall_bias,
-        timeframe_biases,
-        daily_range_context["zone"]
-    )
-
-    # --------------------------------------------------------
-    # MARKET CONTEXT
-    # --------------------------------------------------------
-
-    ADR_consumed = (
-        (
-            current_daily_range
-            / ADR14
         ) * 100
-        if ADR14
-        else None
-    )
 
-    market_context = {
 
-        "regime": (
-            "trend"
-            if overall_bias
-            in (
-                "bullish",
-                "bearish"
-            )
-            else "range"
-        ),
+    if range_position is None:
 
-        "price_location":
-            daily_range_context["zone"],
+        range_zone = "unknown"
 
-        "premium_discount":
-            daily_range_context[
-                "premium_discount"
-            ],
+    elif range_position <= 30:
 
-        "middle_of_range":
-            (
-                daily_range_context[
-                    "zone"
-                ]
-                == "middle_range"
-            ),
+        range_zone = "discount"
 
-        "ADR_consumed_percent":
-            ADR_consumed,
+    elif range_position >= 70:
 
-        "ADR_80_percent_reached":
-            (
-                ADR14 is not None
-                and current_daily_range
-                >= ADR14 * 0.8
-            ),
+        range_zone = "premium"
 
-        "near_daily_high":
-            (
-                abs(
-                    current_price
-                    - current_day["high"]
-                )
-                <= (
-                    ADR14 * 0.05
-                    if ADR14
-                    else 0
-                )
-            ),
+    else:
 
-        "near_daily_low":
-            (
-                abs(
-                    current_price
-                    - current_day["low"]
-                )
-                <= (
-                    ADR14 * 0.05
-                    if ADR14
-                    else 0
-                )
-            )
-    }
+        range_zone = "equilibrium"
+
 
     # --------------------------------------------------------
-    # RESPONSE
+    # RESULT
     # --------------------------------------------------------
 
     return {
 
-        "request": {
-            "original_symbol":
-                original_symbol,
+        "symbol":
+            display_symbol,
 
-            "normalized_symbol":
-                symbol,
+        "api_symbol":
+            api_symbol,
 
-            "timestamp_utc":
-                datetime.now(
-                    timezone.utc
-                ).isoformat(),
+        "timestamp":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
 
-            "timezone":
-                "Europe/Berlin"
-        },
+        "market_status":
+            market_status,
 
-        "current_price":
-            current_price,
+        "price_source":
+            price_source,
 
-        "market": {
+        "price":
+            price,
 
-            "overall_bias":
+        "last_completed_candle":
+            last_candle_time,
+
+        "live_quote_available":
+            live_price is not None,
+
+        "quote_error":
+            quote_error,
+
+        "bias": {
+
+            "overall":
                 overall_bias,
 
-            "bias_score":
-                bias_score,
+            "bullish_count":
+                bullish,
 
-            "confidence":
-                confidence,
+            "bearish_count":
+                bearish,
 
-            "bullish_timeframes":
-                bullish_count,
+            "timeframes":
+                biases
 
-            "bearish_timeframes":
-                bearish_count,
-
-            "timeframe_biases":
-                timeframe_biases
         },
 
         "daily": {
@@ -1726,8 +2099,8 @@ def analysis_data(symbol: str):
             "previous":
                 previous_day,
 
-            "current_range":
-                current_daily_range,
+            "range":
+                current_range,
 
             "ADR5":
                 ADR5,
@@ -1741,114 +2114,956 @@ def analysis_data(symbol: str):
             "ADR20":
                 ADR20,
 
-            "ADR_consumed_percent":
-                ADR_consumed,
+            "ADR_consumed":
+                (
 
-            "range_context":
-                daily_range_context
+                    current_range
+                    / ADR14
+                    * 100
+
+                    if ADR14
+
+                    else None
+
+                ),
+
+            "range_position":
+                range_position,
+
+            "range_zone":
+                range_zone
+
         },
 
         "sessions": {
 
-            "Asia_00_09":
+            "Asia":
                 asia,
 
-            "London_09_12":
-                london,
+            "London":
+                london
 
-            "London_09_18":
-                london_extended
         },
 
         "pivots":
-            pivot_data,
-
-        "levels":
-            levels,
-
-        "distance_from_levels":
-            distances,
+            pivots,
 
         "timeframes":
-            timeframes,
+            timeframes
 
-        "liquidity":
-            liquidity_data,
-
-        "setups":
-            setups,
-
-        "market_context":
-            market_context,
-
-        "analysis_rules": {
-
-            "use_1D_context":
-                True,
-
-            "use_4H_context":
-                True,
-
-            "use_1H_context":
-                True,
-
-            "use_15m_context":
-                True,
-
-            "use_5m_execution":
-                True,
-
-            "use_1m_execution":
-                True,
-
-            "use_daily_range":
-                True,
-
-            "use_sessions":
-                True,
-
-            "use_pivots":
-                True,
-
-            "use_liquidity":
-                True,
-
-            "use_FVG":
-                True,
-
-            "use_BOS":
-                True,
-
-            "use_CHoCH":
-                True,
-
-            "use_ADR":
-                True,
-
-            "separate_bias_from_entry":
-                True,
-
-            "allow_no_trade":
-                True,
-
-            "never_force_trade":
-                True
-        }
     }
 
+
+# ============================================================
+# ANALYZE ONE SYMBOL
+# ============================================================
+
+def analyze_symbol(
+    display_symbol,
+    api_symbol
+):
+
+    cache_key = display_symbol
+
+    now = time.time()
+
+
+    cached = CACHE.get(
+        cache_key
+    )
+
+
+    if cached:
+
+        age = (
+
+            now
+            - cached["timestamp"]
+
+        )
+
+
+        if age < CACHE_TTL_SECONDS:
+
+            return cached["data"]
+
+
+    try:
+
+        market_data = build_market_data(
+
+            display_symbol,
+
+            api_symbol
+
+        )
+
+
+        result = {
+
+            "symbol":
+                display_symbol,
+
+            "price":
+                market_data[
+                    "price"
+                ],
+
+            "market_status":
+                market_data[
+                    "market_status"
+                ],
+
+            "price_source":
+                market_data[
+                    "price_source"
+                ],
+
+            "last_completed_candle":
+                market_data[
+                    "last_completed_candle"
+                ],
+
+            "live_quote_available":
+                market_data[
+                    "live_quote_available"
+                ],
+
+            "quote_error":
+                market_data[
+                    "quote_error"
+                ],
+
+            "market":
+                market_data[
+                    "bias"
+                ],
+
+            "daily":
+                market_data[
+                    "daily"
+                ],
+
+            "sessions":
+                market_data[
+                    "sessions"
+                ],
+
+            "pivots":
+                market_data[
+                    "pivots"
+                ],
+
+            "timeframes":
+                market_data[
+                    "timeframes"
+                ],
+
+            "timestamp":
+                market_data[
+                    "timestamp"
+                ]
+
+        }
+
+
+        CACHE[cache_key] = {
+
+            "timestamp":
+                now,
+
+            "data":
+                result
+
+        }
+
+
+        return result
+
+
+    except HTTPException as e:
+
+        return {
+
+            "symbol":
+                display_symbol,
+
+            "price":
+                None,
+
+            "market_status":
+                "DATA_ERROR",
+
+            "price_source":
+                "NONE",
+
+            "live_quote_available":
+                False,
+
+            "error":
+                e.detail,
+
+            "timestamp":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+
+        }
+
+
+    except Exception as e:
+
+        return {
+
+            "symbol":
+                display_symbol,
+
+            "price":
+                None,
+
+            "market_status":
+                "SYSTEM_ERROR",
+
+            "price_source":
+                "NONE",
+
+            "live_quote_available":
+                False,
+
+            "error": {
+
+                "type":
+                    type(e).__name__,
+
+                "message":
+                    str(e)
+
+            },
+
+            "timestamp":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+
+        }
+
+
+# ============================================================
+# ALL MARKETS
+# ============================================================
+
+def analyze_all():
+
+    results = []
+
+
+    for (
+        display_symbol,
+        api_symbol
+
+    ) in WATCHLIST:
+
+        results.append(
+
+            analyze_symbol(
+
+                display_symbol,
+
+                api_symbol
+
+            )
+
+        )
+
+
+    return {
+
+        "timestamp":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
+
+        "symbols":
+            results
+
+    }
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+def root():
+
+    return {
+
+        "status":
+            "online",
+
+        "service":
+            "Trading AI Market Data API",
+
+        "dashboard":
+            "/dashboard",
+
+        "dashboard_data":
+            "/dashboard-data",
+
+        "analysis_data":
+            "/analysis-data",
+
+        "single_symbol":
+            "/api?symbol=EURUSD",
+
+        "health":
+            "/health"
+
+    }
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return {
+
+        "status":
+            "ok",
+
+        "twelve_data_key":
+            bool(
+                TWELVE_DATA_API_KEY
+            ),
+
+        "cache_ttl":
+            CACHE_TTL_SECONDS
+
+    }
+
+
+# ============================================================
+# SINGLE SYMBOL API
+# ============================================================
+
 @app.get("/api")
-def api_analysis(symbol: str):
-    return analysis_data(symbol)
+def single_symbol(
+    symbol: str
+):
+
+    normalized = normalize_symbol(
+        symbol
+    )
 
 
-@app.get("/data")
-def data_analysis(symbol: str):
-    return analysis_data(symbol)
+    return build_market_data(
+
+        symbol.upper(),
+
+        normalized
+
+    )
+
+
+# ============================================================
+# DASHBOARD DATA
+# ============================================================
 
 @app.get("/dashboard-data")
 def dashboard_data():
+
     return analyze_all()
+
+
+# ============================================================
+# GPT ACTION ENDPOINT
+#
+# IMPORTANT:
+# This endpoint DOES NOT require ?symbol=
+#
+# It returns all instruments in one request.
+# ============================================================
 
 @app.get("/analysis-data")
 def analysis_data():
+
     return analyze_all()
+
+
+# ============================================================
+# FORMAT HELPERS
+# ============================================================
+
+def fmt_price(
+    value
+):
+
+    if value is None:
+
+        return "—"
+
+
+    try:
+
+        value = float(value)
+
+    except Exception:
+
+        return "—"
+
+
+    if abs(value) >= 100:
+
+        return f"{value:.2f}"
+
+
+    if abs(value) >= 10:
+
+        return f"{value:.3f}"
+
+
+    return f"{value:.5f}"
+
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+
+@app.get(
+    "/dashboard",
+    response_class=HTMLResponse
+)
+def dashboard():
+
+    data = analyze_all()
+
+    rows = []
+
+
+    for item in data[
+        "symbols"
+    ]:
+
+        symbol = item.get(
+            "symbol",
+            "UNKNOWN"
+        )
+
+
+        price = item.get(
+            "price"
+        )
+
+
+        market_status = item.get(
+            "market_status",
+            "UNKNOWN"
+        )
+
+
+        price_source = item.get(
+            "price_source",
+            "UNKNOWN"
+        )
+
+
+        last_candle = item.get(
+            "last_completed_candle",
+            "—"
+        )
+
+
+        error = item.get(
+            "error"
+        )
+
+
+        if error:
+
+            error_text = str(
+                error
+            )
+
+        else:
+
+            error_text = ""
+
+
+        bias_data = item.get(
+            "market",
+            {}
+        )
+
+
+        overall_bias = bias_data.get(
+            "overall",
+            "unknown"
+        )
+
+
+        bias_class = (
+
+            "bullish"
+
+            if overall_bias
+            == "bullish"
+
+            else
+
+            "bearish"
+
+            if overall_bias
+            == "bearish"
+
+            else
+
+            "neutral"
+
+        )
+
+
+        rows.append(f"""
+
+<tr>
+
+<td class="symbol">
+{symbol}
+</td>
+
+
+<td class="price">
+{fmt_price(price)}
+</td>
+
+
+<td>
+
+<span class="status {market_status.lower()}">
+
+{market_status}
+
+</span>
+
+<div class="small">
+
+{price_source}
+
+</div>
+
+</td>
+
+
+<td>
+
+<span class="bias {bias_class}">
+
+{overall_bias.upper()}
+
+</span>
+
+</td>
+
+
+<td>
+
+{bias_data.get(
+    "bullish_count",
+    "—"
+)}
+bullish /
+
+{bias_data.get(
+    "bearish_count",
+    "—"
+)}
+bearish
+
+</td>
+
+
+<td>
+
+{last_candle}
+
+</td>
+
+
+<td class="error">
+
+{error_text}
+
+</td>
+
+
+</tr>
+
+""")
+
+
+    generated = datetime.now(
+        TZ
+    ).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+    page = f"""
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+name="viewport"
+content="width=device-width,initial-scale=1"
+>
+
+<title>
+Trading AI Market Data
+</title>
+
+
+<style>
+
+* {{
+    box-sizing:border-box;
+}}
+
+
+body {{
+
+    margin:0;
+
+    background:#0b0f14;
+
+    color:#e8edf3;
+
+    font-family:
+        Arial,
+        Helvetica,
+        sans-serif;
+
+}}
+
+
+.container {{
+
+    padding:24px;
+
+    overflow-x:auto;
+
+}}
+
+
+.header {{
+
+    display:flex;
+
+    justify-content:
+        space-between;
+
+    margin-bottom:20px;
+
+    gap:20px;
+
+}}
+
+
+h1 {{
+
+    margin:0;
+
+    font-size:28px;
+
+}}
+
+
+.subtitle {{
+
+    color:#8996a5;
+
+    margin-top:6px;
+
+    font-size:13px;
+
+}}
+
+
+.refresh {{
+
+    display:inline-block;
+
+    padding:10px 14px;
+
+    background:#151d27;
+
+    border:1px solid #344150;
+
+    border-radius:6px;
+
+    color:#fff;
+
+    text-decoration:none;
+
+}}
+
+
+table {{
+
+    width:100%;
+
+    min-width:1200px;
+
+    border-collapse:
+        collapse;
+
+    background:#111720;
+
+}}
+
+
+th {{
+
+    background:#18212c;
+
+    color:#9eabb9;
+
+    text-align:left;
+
+    padding:13px;
+
+    font-size:11px;
+
+    text-transform:
+        uppercase;
+
+}}
+
+
+td {{
+
+    padding:13px;
+
+    border-top:
+        1px solid #202a35;
+
+    font-size:13px;
+
+    vertical-align:top;
+
+}}
+
+
+.symbol {{
+
+    font-weight:700;
+
+    font-size:15px;
+
+}}
+
+
+.price {{
+
+    font-weight:700;
+
+}}
+
+
+.status,
+.bias {{
+
+    display:inline-block;
+
+    padding:5px 9px;
+
+    border-radius:5px;
+
+    font-size:10px;
+
+    font-weight:700;
+
+}}
+
+
+.status.open,
+.bias.bullish {{
+
+    background:#173b2b;
+
+    color:#61e6a4;
+
+}}
+
+
+.status.closed_or_live_quote_unavailable,
+.bias.neutral {{
+
+    background:#3a3420;
+
+    color:#f0ce69;
+
+}}
+
+
+.status.data_error,
+.status.system_error,
+.bias.bearish {{
+
+    background:#452023;
+
+    color:#ff7d87;
+
+}}
+
+
+.small {{
+
+    color:#8996a5;
+
+    margin-top:5px;
+
+    font-size:11px;
+
+}}
+
+
+.error {{
+
+    color:#ff7d87;
+
+    max-width:500px;
+
+    word-break:break-word;
+
+}}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<div class="container">
+
+
+<div class="header">
+
+<div>
+
+<h1>
+Trading AI Market Data
+</h1>
+
+<div class="subtitle">
+
+11 Forex / XAUUSD instruments ·
+Twelve Data ·
+multi-timeframe data
+
+</div>
+
+</div>
+
+
+<div>
+
+<div class="subtitle">
+
+Updated:
+{generated}
+
+</div>
+
+<br>
+
+<a
+class="refresh"
+href="/dashboard"
+>
+Refresh
+</a>
+
+</div>
+
+</div>
+
+
+<table>
+
+<thead>
+
+<tr>
+
+<th>
+Symbol
+</th>
+
+<th>
+Price
+</th>
+
+<th>
+Market
+</th>
+
+<th>
+MTF Bias
+</th>
+
+<th>
+Structure
+</th>
+
+<th>
+Last Candle
+</th>
+
+<th>
+Error
+</th>
+
+</tr>
+
+</thead>
+
+
+<tbody>
+
+{"".join(rows)}
+
+</tbody>
+
+</table>
+
+
+<div class="subtitle">
+
+GPT Action endpoint:
+
+/analysis-data
+
+</div>
+
+
+</div>
+
+</body>
+
+</html>
+
+"""
+
+
+    return HTMLResponse(
+        content=page
+    )
