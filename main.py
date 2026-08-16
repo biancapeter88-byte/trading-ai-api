@@ -1844,3 +1844,9 @@ def api_analysis(symbol: str):
 @app.get("/data")
 def data_analysis(symbol: str):
     return analysis_data(symbol)
+
+
+@app.get("/analysis-data")
+def analysis_data():
+
+    return analyze_all()
