@@ -1178,6 +1178,7 @@ def root():
 # ============================================================
 
 @app.get("/analysis-data")
+@app.get("/getAnalysisData")
 def analysis_data(symbol: str):
 
     original_symbol = symbol
