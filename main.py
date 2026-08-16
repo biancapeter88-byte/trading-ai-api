@@ -1721,8 +1721,8 @@ def build_market_data(
     # --------------------------------------------------------
 
     last_candle = candles[
-        "1m"
-    ][-1]
+        "5m"
+    ][-5]
 
 
     historical_price = (
